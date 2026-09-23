@@ -1,0 +1,333 @@
+---
+title: "Transcriptomic Profiling & Spike-in Normalized DEG Analysis Report"
+subtitle: "Evaluating Global Transcriptional Repression by LUMINIDEPENDENS (LD) in Arabidopsis (GSE292906)"
+author: "Simon Ho"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "100%"
+)
+```
+
+```{r load-packages}
+# Load core packages for interaction and data visualization
+library(data.table)
+library(tidyverse)
+library(DT)
+library(plotly)
+library(ggplot2)
+```
+
+# Executive Summary & Biological Background
+
+**Dataset Scope — GSE292906**
+
+* **Source Study:** Bergis-Ser C, Wang Q, He X, Nisa M et al. (2025), *Proc Natl Acad Sci U S A* (*LUMINIDEPENDENS orchestrates global transcriptional repression in Arabidopsis*, PMID: 41329727).
+* **Biological Organism:** *Arabidopsis thaliana* (7-day-old plantlets).
+* **Experimental Groups:**
+  * **Control (Col0 / WT):** Wild-type *Arabidopsis thaliana* (Biological triplicates, $n=3$).
+  * **Treatment (ld / Mutant):** *luminidependens* loss-of-function mutant (Biological triplicates, $n=3$).
+* **Sequencing & Spike-in Control:** Single-end RNA-seq (Illumina NextSeq 500) incorporating exogenous *Drosophila melanogaster* spike-in controls for accurate global transcriptomic scaling.
+
+**Core Research Objective**  
+*LUMINIDEPENDENS* ($LD$) was classically recognized as a key autonomous pathway gene regulating flowering time in *Arabidopsis*. However, recent work demonstrates that $LD$ acts as a global transcriptional repressor. Standard median-of-ratios normalization often obscures genome-wide unidirectional expression shifts. By leveraging exogenous *Drosophila* spike-in controls, this analysis quantifies the extent of genome-wide transcriptional activation/derepression triggered by $ld$ loss-of-function.
+
+---
+
+# Executive Summary Highlights
+
+* **Global Derepression Uncovered:** Exogenous spike-in size factor normalization confirms that loss of $LD$ leads to a massive, asymmetric genome-wide upregulation, verifying the global transcriptional repressor activity of $LD$.
+* **PCA & Variance Metrics:** High-throughput PCA reveals that PC1 accounts for the primary biological separation between $Col\text{-}0$ and $ld$, driving distinct sample distance clustering.
+* **Reproducible Deliverables:** Complete interactive DEG search tables, annotated volcano plots, high-resolution PC1 driver heatmaps, pathway network maps, and GSEA enrichment profiles.
+
+---
+
+# 🛠️ Analytical Pipeline Overview (Steps 0–7)
+
+The bioinformatic analysis workflow implemented for GSE292906 follows a robust 8-step pipeline:
+
+* **Step 0: Raw Data Processing & Quantification Pipeline (`0.Upstream_Processing_Pipeline.sh`)**  
+  * **SRA Retrieval:** Fetches SRA files via `prefetch` and converts them into gzipped FASTQ files using `fasterq-dump` and `pigz`.
+  * **Quality Control:** Assesses initial read quality using `FastQC` and aggregates multi-sample reports via `MultiQC`.
+  * **Adapter & Quality Trimming:** Cleans raw reads using `fastp` (`--cut_front --cut_tail --cut_mean_quality 20`) to remove low-quality bases and adapters.
+  * **Genome Indexing & Alignment:** Aligns trimmed reads to the hybrid reference genome (*A. thaliana* TAIR10 + *D. melanogaster* spike-in) using `HISAT2` and sorts outputs with `samtools`.
+  * **Gene Quantification:** Quantifies gene-level read counts across samples using `featureCounts` against the hybrid GTF annotation.
+* **Step 1: Data Retrieval & Spike-in Matrix Splitting (`1.GSE292906_matrix_metadata_spike.R`)**  
+  Imports featureCounts matrices, maps SRA metadata, and splits endogenous *TAIR10* genes from exogenous *Drosophila* (FBgn) spike-in controls.
+* **Step 2: Spike-in Size Factor Calibration & DESeq2 DEG (`2.GSE292906_DEseq2_spike.R`)**  
+  Estimates size factors exclusively from *Drosophila* spike-ins and injects them into *TAIR10* DESeq2 analysis to detect true global expression changes without compositional bias.
+* **Step 3: VST Variance Transformation & PCA Distance (`3.GSE292906_PCA_Distance_spike.R`)**  
+  Applies VST transformation, generates sample distance heatmaps, computes PC loadings, and calculates centroid Euclidean distance between $Col\text{-}0$ and $ld$.
+* **Step 4: Annotated Volcano Plot Construction (`4.GSE292906_Volcano_spike.R`)**  
+  Annotates TAIR IDs with official gene symbols via `org.At.tair.db`, highlighting top PC1 driver genes and specific targets (e.g., $LD$).
+* **Step 5: Truncated Z-Score ComplexHeatmap (`5.GSE292906_Heatmap_spike.R`)**  
+  Renders dual-block heatmaps (PC1 Top 30 Positive vs Top 30 Negative loadings) with Z-score truncation $[-2, 2]$ for optimal visual clarity.
+* **Step 6: Over-Representation Analysis (`6.GSE292906_ORA_enrichment_spike.R`)**  
+  Executes GO (BP/MF) and KEGG enrichment, outputting network `cnetplot` diagrams, `treeplot` clusters, and topology maps via Pathview.
+* **Step 7: Gene Set Enrichment Analysis (`7.GSE292906_GSEA_spike.R`)**  
+  Ranks the complete transcriptome by $\log_2\text{FC}$ to perform GSEA, generating dotplots, ridgeplots, and classic enrichment profiles.
+
+---
+
+# 1. Sequencing Quality Control & Read Trimming (Step 0)
+
+Raw FASTQ files were subjected to adapter trimming and quality filtering using **fastp**. Sequence quality metrics, read depth, and trimming efficiency across all biological samples were aggregated using **MultiQC**. The interactive MultiQC report is embedded below:
+
+```{r multiqc-report-iframe, echo=FALSE, out.width='100%', out.height='800px'}
+if (file.exists("./display/multiqc_report.html")) {
+  knitr::include_url("./display/multiqc_report.html")
+} else {
+  cat("MultiQC report (./display/multiqc_report.html) not found.")
+}
+```
+
+---
+
+# 2. Spike-in Normalized DEG & Sample Distance (Steps 2–3) {.tabset .tabset-fade}
+
+## 🗺️ Sample Distance Heatmap
+
+```{r dist-heatmap, echo=FALSE}
+if (file.exists("./display/GSE292906_distance_heatmap.png")) {
+  knitr::include_graphics("./display/GSE292906_distance_heatmap.png")
+} else {
+  cat("Distance heatmap image not found in ./display/.")
+}
+```
+
+**Sample Distance Interpretation**
+
+  * The hierarchical clustering clearly separates the Col0 and ld samples into two distinct biological groups with high within-group consistency.
+
+## 📊 Interactive DEG Table (Searchable)
+
+```{r deg-table}
+if (file.exists("./display/GSE292906_DEG_ld_vs_Col0_annotated.tsv")) {
+  deg_df <- fread("./display/GSE292906_DEG_ld_vs_Col0_annotated.tsv")
+  
+  datatable(
+    deg_df,
+    filter = 'top',
+    extensions = 'Buttons',
+    caption = 'Table 1: DESeq2 Differential Expression Results (Spike-in Size Factor Normalized)',
+    options = list(
+      pageLength = 10,
+      dom = 'Bfrtip',
+      buttons = c('copy', 'csv', 'excel')
+    )
+  ) %>% 
+    formatSignif(columns = c("pvalue", "padj"), digits = 3) %>% 
+    formatRound(columns = c("log2FoldChange", "stat", "lfcSE"), digits = 2)
+} else {
+  cat("DEG results table not found in ./display/ directory.")
+}
+```
+
+---
+
+# 3. Global Trajectory & PCA Driver Loadings (Step 3) {.tabset .tabset-fade}
+
+## 📊 PCA Projection (Biplot)
+
+```{r pca-biplot, echo=FALSE}
+if (file.exists("./display/GSE292906_PCA_biplot.png")) {
+  knitr::include_graphics("./display/GSE292906_PCA_biplot.png")
+} else {
+  cat("PCA Biplot image not found in ./display/.")
+}
+```
+
+**PCA Projection Interpretation**
+
+  * PC1 accounts for nearly 88% of the total variance and effectively segregates the Col0 and $ld$ genotypes along the primary axis.
+
+## 📈 PC1 Loadings Barplot
+
+```{r pca-loadings-plot, echo=FALSE}
+if (file.exists("./display/GSE292906_PCA_PC1_loadings_barplot.png")) {
+  knitr::include_graphics("./display/GSE292906_PCA_PC1_loadings_barplot.png")
+} else {
+  cat("PC1 Loadings Barplot not found in ./display/.")
+}
+```
+
+## 📋 Top PC1 Loadings Table
+
+```{r pc1-loadings-table}
+if (file.exists("./display/GSE292906_PC1_loadings.tsv")) {
+  loadings_df <- fread("./display/GSE292906_PC1_loadings.tsv")
+  
+  datatable(
+    head(loadings_df, 100),
+    filter = 'top',
+    caption = 'Table 2: Top 100 Genes Driving PC1 Separation (Col0 vs ld)',
+    options = list(pageLength = 8, dom = 'Bfrtip')
+  ) %>% formatRound(columns = c("loading"), digits = 4)
+} else {
+  cat("PC1 loadings table not found in ./display/.")
+}
+```
+
+## 📏 Centroid Distance Metric
+
+```{r distance-summary-table}
+if (file.exists("./display/GSE292906_PC1_PC2_distance_summary.tsv")) {
+  dist_summary <- fread("./display/GSE292906_PC1_PC2_distance_summary.tsv")
+  
+  datatable(
+    dist_summary,
+    options = list(dom = 't'),
+    rownames = FALSE,
+    caption = 'Table 3: Quantified Centroid Distance across PC1 & PC2'
+  )
+} else {
+  cat("Centroid distance summary not found in ./display/.")
+}
+```
+
+---
+
+# 4. Transcriptomic Profiling & Heatmap (Steps 4–5) {.tabset .tabset-fade}
+
+## 📌 Publication Volcano Plot
+
+```{r static-volcano, echo=FALSE}
+if (file.exists("./display/GSE292906_Volcano_ld_vs_Col0_PC1_annotated.png")) {
+  knitr::include_graphics("./display/GSE292906_Volcano_ld_vs_Col0_PC1_annotated.png")
+} else {
+  cat("Annotated Volcano plot image not found in ./display/.")
+}
+```
+
+**Volcano Plot Highlights**
+
+  * The volcano plot (ld vs. Col0) reveals an extreme asymmetry in differentially expressed genes within the $ld$ mutant, where up-regulated genes (16,804) overwhelmingly outnumber down-regulated genes (85).
+  * Top PC1 drivers (gold dots) markedly enriched in the up-regulated region, whereas the target gene $LD$ (magenta diamond) shows no significant activation and remains suppressed due to its knockout in the mutant.
+
+## 🧬 ComplexHeatmap Profiling
+
+```{r pc1-heatmap, echo=FALSE}
+if (file.exists("./display/GSE292906_Heatmap_PC1_pretty.png")) {
+  knitr::include_graphics("./display/GSE292906_Heatmap_PC1_pretty.png")
+} else {
+  cat("PC1 ComplexHeatmap image not found in ./display/.")
+}
+```
+
+**Heatmap Pattern Interpretation**
+
+  * The heatmap illustrates a clear transcriptomic shift where PC1 positive-loading genes associated with normal development are downregulated in the ld mutant.
+  * whereas PC1 negative-loading genes involved in defense, stress response, and cell wall modification are highly activated.
+
+---
+
+# 5. Over-Representation & Pathway Topology (Step 6) {.tabset .tabset-fade}
+
+## 🕸️ GO BP Cnetplot
+
+```{r cnetplot-bp, echo=FALSE}
+if (file.exists("./display/GSE292906_cnetplot_GO_BP_Up.png")) {
+  knitr::include_graphics("./display/GSE292906_cnetplot_GO_BP_Up.png")
+} else {
+  cat("GO BP Cnetplot image not found in ./display/.")
+}
+```
+
+## ⭕ GO BP Cluster Treeplot
+
+```{r treeplot-bp, echo=FALSE}
+if (file.exists("./display/GSE292906_GOCluster_BP_Up.png")) {
+  knitr::include_graphics("./display/GSE292906_GOCluster_BP_Up.png")
+} else {
+  cat("GO BP Cluster image not found in ./display/.")
+}
+```
+
+**GO BP Cluster Interpretation**
+
+  * GO enrichment analysis reveals that the up-regulated genes are predominantly clustered in cell wall organization and modification, secondary metabolite biosynthesis, and vascular transport processes.
+  * Biologically, this suggests that the loss of $LD$ triggers a coordinated stress response and cell wall remodeling, likely compensating for developmental or structural disruptions caused by the mutation.
+
+## 🗺️ KEGG Pathview (Phenylpropanoid Biosynthesis)
+
+```{r pathview-ath00940, echo=FALSE}
+if (file.exists("./display/ath00940.pathview.png")) {
+  knitr::include_graphics("./display/ath00940.pathview.png")
+} else {
+  cat("KEGG Pathview image not found in ./display/.")
+}
+```
+
+**Biological Pathway Summary**
+
+  * **Derepressed Functions**: Functional enrichment of upregulated genes reveals significant over-representation in secondary metabolism, cell wall modification, and transcriptional regulation pathways.
+  * **Mechanistic Insight**: Validates that $LD$ operates as an overarching chromatin or transcriptional repressor whose absence triggers global transcriptomic derepression.
+
+---
+
+# 6. Gene Set Enrichment Analysis (GSEA) (Step 7) {.tabset .tabset-fade}
+
+## 🔵 GO BP Dotplot Overview
+
+```{r gsea-dotplot, echo=FALSE}
+if (file.exists("./display/GSE292906_GSEA_Dotplot_GO_BP.png")) {
+  knitr::include_graphics("./display/GSE292906_GSEA_Dotplot_GO_BP.png")
+} else {
+  cat("GSEA Dotplot image not found in ./display/.")
+}
+```
+
+## ⛰️ GO BP Ridgeplot
+
+```{r gsea-ridgeplot, echo=FALSE}
+if (file.exists("./display/GSE292906_GSEA_Ridgeplot_GO_BP.png")) {
+  knitr::include_graphics("./display/GSE292906_GSEA_Ridgeplot_GO_BP.png")
+} else {
+  cat("GSEA Ridgeplot image not found in ./display/.")
+}
+```
+**GO BP Ridgeplot Interpretation**
+
+  * The GSEA ridgeplot demonstrates a widespread positive shift in expression for pathways related to cell wall modification, pectin catabolism, and secondary metabolism. 
+  * Biologically, this uniform activation across entire gene sets indicates that the loss of $LD$ induces systematic structural reorganization of the cell wall and metabolic reprogramming, rather than isolated gene-level fluctuations.
+
+## 📈 Top KEGG Enrichment Profile (ath00940)
+
+```{r gsea-kegg-top1, echo=FALSE}
+if (file.exists("./display/GSE292906_GSEA_KEGG_Top1_ath00940.png")) {
+  knitr::include_graphics("./display/GSE292906_GSEA_KEGG_Top1_ath00940.png")
+} else {
+  cat("Top KEGG GSEA profile image not found in ./display/.")
+}
+```
+
+**GSEA Insights**
+
+  * GSEA analysis demonstrates strong positive enrichment for the phenylpropanoid biosynthesis pathway (ath00940), reaching a high peak Running Enrichment Score (RES) of approximately 0.48 at the top-ranked gene positions (around Rank 5,000 out of ~20,000 total genes). 
+  * Biologically, this dramatic upregulation of pathway genes indicates a robust metabolic shift toward lignin biosynthesis and cell wall reinforcement in the $ld$ mutant.
+
+---
+
+# Reproducibility & Session Info
+
+```{r session-info}
+sessionInfo()
+```
